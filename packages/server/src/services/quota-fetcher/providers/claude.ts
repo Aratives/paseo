@@ -70,6 +70,8 @@ interface ClaudeCredentialRecord {
 interface ClaudeQuotaProviderOptions {
   logger: Logger;
   claudeHome?: string;
+  providerId?: string;
+  displayName?: string;
   claudeKeychainReader?: () => Promise<unknown | null>;
   platform?: typeof process.platform;
   fetch?: ProviderApiFetch;
@@ -101,8 +103,8 @@ async function readClaudeKeychainCredentials(): Promise<unknown | null> {
 }
 
 export class ClaudeQuotaProvider implements ProviderUsageFetcher {
-  readonly providerId = "claude";
-  readonly displayName = "Claude";
+  readonly providerId: string;
+  readonly displayName: string;
 
   private readonly claudeHome: string;
   private readonly readKeychainCredentials: () => Promise<unknown | null>;
@@ -110,6 +112,8 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
   private readonly fetchApi: ProviderApiFetch;
 
   constructor(options: ClaudeQuotaProviderOptions) {
+    this.providerId = options.providerId ?? "claude";
+    this.displayName = options.displayName ?? "Claude";
     this.claudeHome =
       options.claudeHome || process.env["CLAUDE_HOME"] || join(homedir(), ".claude");
     this.readKeychainCredentials = options.claudeKeychainReader ?? readClaudeKeychainCredentials;
@@ -282,11 +286,13 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
     oauth: ClaudeCredentials["claudeAiOauth"],
   ): Promise<void> {
     try {
-      const existing = ClaudeCredentialsSchema.parse(
-        JSON.parse(await fs.readFile(credPath, "utf8")),
-      );
-      existing.claudeAiOauth = oauth;
-      await fs.writeFile(credPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
+      const existing: unknown = JSON.parse(await fs.readFile(credPath, "utf8"));
+      const record =
+        existing && typeof existing === "object" && !Array.isArray(existing)
+          ? (existing as Record<string, unknown>)
+          : {};
+      record["claudeAiOauth"] = oauth;
+      await fs.writeFile(credPath, JSON.stringify(record, null, 2), { mode: 0o600 });
     } catch {
       // Non-fatal; Claude Code can refresh again on its own next time.
     }

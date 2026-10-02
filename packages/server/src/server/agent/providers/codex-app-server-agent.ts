@@ -73,7 +73,12 @@ import {
 import { createPathEquivalenceMatcher } from "../../../utils/path.js";
 import { spawnProcess } from "../../../utils/spawn.js";
 import { extractCodexTerminalSessionId, nonEmptyString } from "./tool-call-mapper-utils.js";
-import { buildCodexFeatures, codexModelSupportsFastMode } from "./codex-feature-definitions.js";
+import {
+  buildCodexFeatures,
+  codexModelSupportsFastMode,
+  codexModelSupportsUltrafastMode,
+  registerCodexModelServiceTiers,
+} from "./codex-feature-definitions.js";
 import {
   CodexAppServerClient,
   CodexAppServerRpcError,
@@ -885,6 +890,29 @@ interface CodexModel {
   supportedReasoningEfforts?: CodexReasoningEffortEntry[];
 }
 
+/** Read tier data from the raw response; the parsed schema is a lossy subset. */
+function resolveCodexModelServiceTierEntries(
+  rawResponse: unknown,
+): { id?: unknown; model?: unknown; serviceTiers?: unknown; additionalSpeedTiers?: unknown }[] {
+  const response = toObjectRecord(rawResponse);
+  const entries = Array.isArray(response?.data) ? response.data : [];
+  return entries.map((entry) => toObjectRecord(entry) ?? {});
+}
+
+/** Re-derive the persisted speed tier, dropping it when the model no longer offers it. */
+function resolveRestoredCodexServiceTier(config: {
+  model?: string | null;
+  featureValues?: Record<string, unknown> | null;
+}): "fast" | "ultrafast" | null {
+  if (config.featureValues?.ultrafast_mode && codexModelSupportsUltrafastMode(config.model)) {
+    return "ultrafast";
+  }
+  if (config.featureValues?.fast_mode && codexModelSupportsFastMode(config.model)) {
+    return "fast";
+  }
+  return null;
+}
+
 const CodexModelListResponseSchema = z.object({
   data: z
     .array(
@@ -903,6 +931,16 @@ const CodexModelListResponseSchema = z.object({
             }),
           )
           .optional(),
+        serviceTiers: z
+          .array(
+            z.object({
+              id: z.string().optional(),
+              name: z.string().optional(),
+              description: z.string().optional(),
+            }),
+          )
+          .optional(),
+        additionalSpeedTiers: z.array(z.string()).optional(),
       }),
     )
     .optional(),
@@ -3373,7 +3411,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   private activeForegroundTurnId: string | null = null;
   private activeClientMessageId: string | null = null;
   private cachedRuntimeInfo: AgentRuntimeInfo | null = null;
-  private serviceTier: "fast" | null = null;
+  private serviceTier: "fast" | "ultrafast" | null = null;
   private planModeEnabled = false;
   private historyPending = false;
   private persistedHistory: PersistedTimelineEntry[] = [];
@@ -3462,9 +3500,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.config = config;
     this.asyncQuestions = new CodexAsyncQuestions(resumeHandle?.metadata?.asyncQuestions);
     this.config.thinkingOptionId = normalizeCodexThinkingOptionId(this.config.thinkingOptionId);
-    if (this.config.featureValues?.fast_mode && codexModelSupportsFastMode(this.config.model)) {
-      this.serviceTier = "fast";
-    }
+    this.serviceTier = resolveRestoredCodexServiceTier(this.config);
     if (this.config.featureValues?.plan_mode) {
       this.planModeEnabled = true;
     }
@@ -3483,6 +3519,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     return buildCodexFeatures({
       modelId: this.config.model,
       fastModeEnabled: this.serviceTier === "fast",
+      ultrafastModeEnabled: this.serviceTier === "ultrafast",
       planModeEnabled: this.planModeEnabled,
       planModeAvailable: this.hasPlanCollaborationMode(),
     });
@@ -3515,6 +3552,20 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
   }
 
+  /**
+   * Fast/Ultrafast availability is read from module state populated by
+   * `model/list`. The provider catalog path may not run for this seat, so record
+   * the tiers on the session's own connection as well.
+   */
+  private async loadCodexModelServiceTiers(): Promise<void> {
+    try {
+      const rawResponse = await this.client!.request("model/list", {});
+      registerCodexModelServiceTiers(resolveCodexModelServiceTierEntries(rawResponse));
+    } catch {
+      // Best-effort: the static fast-mode list still applies when this fails.
+    }
+  }
+
   private async establishConnection(): Promise<void> {
     if (this.initialResumePurpose === "history") {
       await this.readArchivedHistory();
@@ -3538,6 +3589,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       await client.request("initialize", buildCodexAppServerInitializeParams());
       client.notify("initialized", {});
 
+      await this.loadCodexModelServiceTiers();
       await this.loadResolvedWorkspaceWrite();
       await this.loadCollaborationModes();
       await this.loadSkills();
@@ -3741,7 +3793,10 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.resolvedCollaborationMode = this.resolveCollaborationMode();
   }
 
-  private applyFeatureValue(featureId: "fast_mode" | "plan_mode", value: boolean): void {
+  private applyFeatureValue(
+    featureId: "fast_mode" | "ultrafast_mode" | "plan_mode",
+    value: boolean,
+  ): void {
     this.config.featureValues = {
       ...this.config.featureValues,
       [featureId]: value,
@@ -3749,6 +3804,12 @@ export class CodexAppServerAgentSession implements AgentSession {
 
     if (featureId === "fast_mode") {
       this.serviceTier = value ? "fast" : null;
+      this.cachedRuntimeInfo = null;
+      return;
+    }
+
+    if (featureId === "ultrafast_mode") {
+      this.serviceTier = value ? "ultrafast" : null;
       this.cachedRuntimeInfo = null;
       return;
     }
@@ -4504,7 +4565,10 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   async setModel(modelId: string | null): Promise<void> {
     this.config.model = modelId ?? undefined;
-    if (!codexModelSupportsFastMode(this.config.model)) {
+    if (this.serviceTier === "fast" && !codexModelSupportsFastMode(this.config.model)) {
+      this.serviceTier = null;
+    }
+    if (this.serviceTier === "ultrafast" && !codexModelSupportsUltrafastMode(this.config.model)) {
       this.serviceTier = null;
     }
     this.refreshResolvedCollaborationMode();
@@ -4528,6 +4592,15 @@ export class CodexAppServerAgentSession implements AgentSession {
         );
       }
       this.applyFeatureValue("fast_mode", Boolean(value));
+      return;
+    }
+    if (featureId === "ultrafast_mode") {
+      if (Boolean(value) && !codexModelSupportsUltrafastMode(this.config.model)) {
+        throw new Error(
+          `Codex ultrafast mode is not available for model '${this.config.model ?? "default"}'`,
+        );
+      }
+      this.applyFeatureValue("ultrafast_mode", Boolean(value));
       return;
     }
     if (featureId === "plan_mode") {
@@ -7288,6 +7361,7 @@ export class CodexAppServerAgentClient implements AgentClient {
       const rawResponse = await runProviderRefreshActivity(context, "model/list", () =>
         client!.request("model/list", {}),
       );
+      registerCodexModelServiceTiers(resolveCodexModelServiceTierEntries(rawResponse));
       const parsedResponse = CodexModelListResponseSchema.safeParse(rawResponse);
       const models = parsedResponse.success ? (parsedResponse.data.data ?? []) : [];
       const configuredDefaults = await runProviderRefreshActivity(context, "config/read", () =>

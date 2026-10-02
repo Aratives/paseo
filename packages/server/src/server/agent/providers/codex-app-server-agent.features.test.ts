@@ -10,6 +10,17 @@ import {
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 
 const CODEX_PROVIDER = "codex";
+const TEST_FAST_MODEL_ADVERTISEMENTS = [
+  "gpt-6-astra",
+  "gpt-6-sol",
+  "gpt-6-luna",
+  "gpt-5.6",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+  "gpt-5.4",
+].map((id) => ({ id, serviceTiers: [{ id: "fast" }] }));
 
 interface CollaborationModeRecord {
   name: string;
@@ -73,6 +84,7 @@ function createSessionHarness(
   const config = createConfig(configOverrides);
   const appServer = createFakeCodexAppServer({
     "collaborationMode/list": () => ({ data: TEST_COLLABORATION_MODES }),
+    "model/list": () => ({ data: TEST_FAST_MODEL_ADVERTISEMENTS }),
   });
   const session = new CodexAppServerAgentSession(
     { ...config, provider: CODEX_PROVIDER },
@@ -324,7 +336,7 @@ describe("Codex app-server provider features", () => {
     );
   });
 
-  test("constructor restores feature flags from config.featureValues", async () => {
+  test("restores feature flags after advertised model discovery", async () => {
     const { session, appServer } = await createConnectedSession({
       featureValues: { fast_mode: true, plan_mode: true },
     });

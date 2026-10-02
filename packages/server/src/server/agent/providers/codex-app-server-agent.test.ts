@@ -112,8 +112,9 @@ interface CodexSessionTestAccess {
   handleToolApprovalRequest(params: unknown): Promise<unknown>;
   handleNotification(method: string, params: unknown): void;
   loadPersistedHistory(client: CodexClientLike | null): Promise<void>;
+  loadCodexModelServiceTiers(): Promise<void>;
   refreshResolvedCollaborationMode(): void;
-  serviceTier: "fast" | null;
+  serviceTier: "fast" | "ultrafast" | null;
   planModeEnabled: boolean;
   collaborationModes: CollaborationModeRecord[];
   config: AgentSessionConfig;
@@ -182,6 +183,21 @@ function createProviderWithFakeAppServer(appServer: FakeCodexAppServer): CodexAp
   internals.autoReviewEnabledPromise = Promise.resolve(false);
   internals.spawnAppServer = async () => appServer.child;
   return provider;
+}
+
+async function advertiseFastTierForTestSession(session: CodexTestSession): Promise<void> {
+  const originalClient = session.client;
+  session.client = createStub<CodexClientLike>({
+    request: async (method: string) => {
+      expect(method).toBe("model/list");
+      return { data: [{ id: asInternals(session).config.model, serviceTiers: [{ id: "fast" }] }] };
+    },
+  });
+  try {
+    await asInternals(session).loadCodexModelServiceTiers();
+  } finally {
+    session.client = originalClient;
+  }
 }
 
 async function startPublicSteeringSession(
@@ -1961,7 +1977,12 @@ describe("Codex app-server provider", () => {
       throw new Error(`resumeSession timed out; thread requests: ${threadRequests.join(", ")}`);
     }
 
-    expect(threadRequests).toEqual(["config/read", "thread/loaded/list", "thread/resume"]);
+    expect(threadRequests).toEqual([
+      "model/list",
+      "config/read",
+      "thread/loaded/list",
+      "thread/resume",
+    ]);
     expect(outcome).toBe("rejected");
     appServer.assertNoErrors();
   });
@@ -5915,6 +5936,7 @@ describe("Codex app-server provider", () => {
     const session = createSession({
       featureValues: { plan_mode: true, fast_mode: true },
     });
+    await advertiseFastTierForTestSession(session);
     const events: AgentStreamEvent[] = [];
     session.subscribe((event) => events.push(event));
 
@@ -6011,6 +6033,7 @@ describe("Codex app-server provider", () => {
     const session = createSession({
       featureValues: { plan_mode: true, fast_mode: true },
     });
+    await advertiseFastTierForTestSession(session);
     asInternals(session).collaborationModes = [
       {
         name: "Code",

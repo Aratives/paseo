@@ -655,6 +655,8 @@ interface ACPModelSelection {
   configOption: SelectConfigOption | null;
   configChoice: SelectConfigChoice | null;
   hasAvailableModels: boolean;
+  /** Model id after qualification against the provider's advertised options. */
+  resolvedModelId: string;
 }
 
 export interface ACPProviderModeWriterContext {
@@ -711,18 +713,63 @@ export function resolveACPModelSelection({
   modelId,
   availableModels,
   configOptions,
+  provider,
 }: {
   modelId: string;
   availableModels: AvailableACPModel[] | null | undefined;
   configOptions: SessionConfigOption[] | null | undefined;
+  provider?: string;
 }): ACPModelSelection {
   const configOption = findSelectConfigOption({ configOptions, category: "model" });
+  const resolvedModelId = qualifyACPModelId({ modelId, provider, availableModels, configOption });
   return {
-    availableModel: availableModels?.find((model) => model.modelId === modelId) ?? null,
+    availableModel: availableModels?.find((model) => model.modelId === resolvedModelId) ?? null,
     configOption,
-    configChoice: findSelectConfigChoice({ option: configOption, value: modelId }),
+    configChoice: findSelectConfigChoice({ option: configOption, value: resolvedModelId }),
     hasAvailableModels: Boolean(availableModels?.length),
+    resolvedModelId,
   };
+}
+
+/**
+ * Providers advertise model ids either bare (`deepseek-v4.1-flash`) or
+ * provider-qualified (`opencode-go/deepseek-v4.1-flash`). Selection only ever
+ * succeeds against an advertised value, so a bare request resolves against the
+ * provider's own option list before it is used.
+ *
+ * Resolution order: exact match, then provider-qualified, then a unique
+ * provider-suffix match. Anything ambiguous is returned unchanged so the caller
+ * reports the invalid selection instead of guessing.
+ */
+function qualifyACPModelId({
+  modelId,
+  provider,
+  availableModels,
+  configOption,
+}: {
+  modelId: string;
+  provider?: string;
+  availableModels?: AvailableACPModel[] | null;
+  configOption?: SelectConfigOption | null;
+}): string {
+  if (!modelId) {
+    return modelId;
+  }
+  const candidates = [
+    ...(configOption
+      ? flattenSelectOptions(configOption.options).map((option) => option.value)
+      : []),
+    ...(availableModels ?? []).map((model) => model.modelId),
+  ];
+  if (candidates.length === 0 || candidates.includes(modelId)) {
+    return modelId;
+  }
+  const providerQualified = provider ? `${provider}/${modelId}` : "";
+  if (providerQualified && candidates.includes(providerQualified)) {
+    return providerQualified;
+  }
+  const matches = candidates.filter((candidate) => candidate.endsWith(`/${modelId}`));
+  return matches.length === 1 ? matches[0] : modelId;
 }
 
 export function deriveModesFromACP(
@@ -2133,6 +2180,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       modelId,
       availableModels: this.availableModels,
       configOptions: this.configOptions,
+      provider: this.provider,
     });
     await this.setModelWithSelection({ modelId, selection });
   }
@@ -2147,6 +2195,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     if (!this.connection || !this.sessionId) {
       throw new Error("ACP session not initialized");
     }
+    modelId = selection.resolvedModelId ?? modelId;
 
     if (selection.hasAvailableModels) {
       if (!selection.availableModel) {
@@ -2829,6 +2878,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
         modelId: configuredModelId,
         availableModels: this.availableModels,
         configOptions: this.configOptions,
+        provider: this.provider,
       });
       try {
         await this.setModelWithSelection({ modelId: configuredModelId, selection });

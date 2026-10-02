@@ -39,6 +39,15 @@ const patchedPackages = [
     patchPrefix: "@opencode-ai+sdk+",
     cwd: "packages/server",
   },
+  // Accept MCP protocol revision 2026-07-28, which newer agent CLIs (codex, agy)
+  // request when connecting to Paseo's injected MCP server. The SDK does not
+  // recognise it and answers 400, so those agents cannot connect at all.
+  // Removes the unreleased revision once the SDK ships support for it.
+  // https://github.com/modelcontextprotocol/typescript-sdk
+  {
+    nodeModulesPath: "node_modules/@modelcontextprotocol/sdk",
+    patchPrefix: "@modelcontextprotocol+sdk+",
+  },
 ];
 
 const installedPackages = patchedPackages.filter(({ nodeModulesPath }) =>

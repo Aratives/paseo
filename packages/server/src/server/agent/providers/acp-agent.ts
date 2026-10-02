@@ -756,12 +756,14 @@ function qualifyACPModelId({
     return modelId;
   }
   const candidates = [
-    ...(configOption
-      ? flattenSelectOptions(configOption.options).map((option) => option.value)
-      : []),
-    ...(availableModels ?? []).map((model) => model.modelId),
+    ...new Set([
+      ...(configOption
+        ? flattenSelectOptions(configOption.options).map((option) => option.value)
+        : []),
+      ...(availableModels ?? []).map((model) => model.modelId),
+    ]),
   ];
-  if (candidates.length === 0 || candidates.includes(modelId)) {
+  if (candidates.length === 0 || candidates.includes(modelId) || modelId.includes("/")) {
     return modelId;
   }
   const providerQualified = provider ? `${provider}/${modelId}` : "";

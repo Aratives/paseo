@@ -893,6 +893,86 @@ describe("deriveModesFromACP", () => {
 });
 
 describe("ACP selection validity helpers", () => {
+  test.each([
+    ["muse-spark", ["opencode/muse-spark"], "opencode", "opencode/muse-spark"],
+    ["muse-spark", ["vendor/muse-spark"], "opencode", "vendor/muse-spark"],
+    ["muse-spark", ["first/muse-spark", "second/muse-spark"], "opencode", "muse-spark"],
+    ["muse-spark", ["first/muse-spark", "opencode/muse-spark"], "opencode", "opencode/muse-spark"],
+    ["muse-spark", ["muse-spark", "opencode/muse-spark"], "opencode", "muse-spark"],
+    ["missing", ["opencode/muse-spark"], "opencode", "missing"],
+    ["vendor/muse-spark", ["other/vendor/muse-spark"], "opencode", "vendor/muse-spark"],
+    [
+      "muse-spark-contributor",
+      ["vendor/muse-spark-contributor-free", "vendor/muse-spark-contributor"],
+      "opencode",
+      "vendor/muse-spark-contributor",
+    ],
+    [
+      "muse-spark-contributor",
+      ["vendor/muse-spark-contributor-free"],
+      "opencode",
+      "muse-spark-contributor",
+    ],
+  ])(
+    "resolves requested %s against advertised options %j",
+    (modelId, ids, provider, resolvedModelId) => {
+      const result = resolveACPModelSelection({
+        modelId,
+        provider,
+        availableModels: ids.map((id) => ({ modelId: id, name: id })),
+        configOptions: [],
+      });
+      expect(result).toMatchObject({ resolvedModelId });
+      expect(result.availableModel?.modelId ?? null).toBe(
+        ids.includes(resolvedModelId) ? resolvedModelId : null,
+      );
+    },
+  );
+
+  test("counts the same advertised model once across model and config surfaces", () => {
+    const result = resolveACPModelSelection({
+      modelId: "muse-spark",
+      provider: "opencode",
+      availableModels: [{ modelId: "vendor/muse-spark", name: "Muse" }],
+      configOptions: [
+        {
+          id: "model",
+          name: "Model",
+          type: "select",
+          category: "model",
+          currentValue: "vendor/muse-spark",
+          options: [{ value: "vendor/muse-spark", name: "Muse" }],
+        },
+      ],
+    });
+    expect(result).toMatchObject({
+      resolvedModelId: "vendor/muse-spark",
+      availableModel: { modelId: "vendor/muse-spark" },
+      configChoice: { value: "vendor/muse-spark" },
+    });
+  });
+
+  test("sends the provider-advertised qualified id for explicit and stored selections", async () => {
+    const session = createSessionWithConfig({ model: "muse-spark" });
+    const { internals, unstableSetSessionModel } = prepareConfiguredOverrideSession(session, {
+      currentModel: "vendor/default",
+      availableModels: [{ modelId: "vendor/muse-spark", name: "Muse", description: null }],
+    });
+    await session.setModel("muse-spark");
+    expect(unstableSetSessionModel).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      modelId: "vendor/muse-spark",
+    });
+    expect(internals.currentModel).toBe("vendor/muse-spark");
+    unstableSetSessionModel.mockClear();
+    internals.currentModel = "vendor/default";
+    await internals.applyConfiguredOverrides();
+    expect(unstableSetSessionModel).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      modelId: "vendor/muse-spark",
+    });
+  });
+
   test("classifies advertised ACP modes and select config option choices", () => {
     const result = resolveACPModeSelection({
       modeId: "plan",
